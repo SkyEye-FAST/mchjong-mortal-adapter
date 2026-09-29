@@ -1,62 +1,63 @@
 # MChjong Mortal Adapter
 
 A persistent local HTTP service for MChjong Riichi bot decisions. Four-player
-inference uses the external [Equim-chan/Mortal](https://github.com/Equim-chan/Mortal)
-`Brain`, `DQN`, `MortalEngine` and `libriichi.mjai.Bot` directly. Three-player
-inference uses a separate [Mateces/mortal-sanma](https://github.com/Mateces/mortal-sanma)
-backend with its own model and `libriichi` build. Models load once at startup;
-each table and seat owns independent game state. Only a server-issued legal
-action index and optional action ID cross back to MChjong.
+inference loads `Brain`, `DQN`, `MortalEngine` and `libriichi.mjai.Bot` from
+[Equim-chan/Mortal](https://github.com/Equim-chan/Mortal). Three-player inference
+loads the external [Akagi-MjaiBot-Mortal](https://github.com/shinkuan/Akagi-MjaiBot-Mortal)
+`release3p` model code, checkpoint and `libriichi3p` extension. The adapter owns
+the MChjong API, mjai translation and independent table sessions; model code,
+extensions and weights remain outside the repository. The
+[Mateces/mortal-sanma](https://github.com/Mateces/mortal-sanma) repository is a
+source and protocol reference for sanma.
 
-The pinned sources are official Mortal
-[`0cff2b52982be5b1163aa9a62fb01f03ce91e0d2`](https://github.com/Equim-chan/Mortal/commit/0cff2b52982be5b1163aa9a62fb01f03ce91e0d2)
-for four players with a version 4 model and Mateces/mortal-sanma
-[`bf69bc320d6072bbeae2abfdc57bf876a5bab2e3`](https://github.com/Mateces/mortal-sanma/commit/bf69bc320d6072bbeae2abfdc57bf876a5bab2e3)
-for three players. Startup checks both revisions and the respective action
-space sizes (46 and 44). Checkouts, compiled extensions and model files stay
-outside the Git repository.
+## Verified runtime inputs
+
+| Players | Inference code and extension | Checkpoint | Format |
+| --- | --- | --- | --- |
+| 4 | Official Mortal [`0cff2b52982be5b1163aa9a62fb01f03ce91e0d2`](https://github.com/Equim-chan/Mortal/commit/0cff2b52982be5b1163aa9a62fb01f03ce91e0d2), compiled `libriichi` | Akagi [`v0.1.0/release4p.zip`](https://github.com/shinkuan/Akagi-MjaiBot-Mortal/releases/download/v0.1.0/release4p.zip), SHA-256 `757d3cceca9212e7f88e7614157bd404dd8dee682d3007428f66e02d2f6ff670` | PyTorch `mortal.pth`, version 4, 1012 observation channels, 46 actions |
+| 3 | Akagi [`v0.1.0/release3p.zip`](https://github.com/shinkuan/Akagi-MjaiBot-Mortal/releases/download/v0.1.0/release3p.zip), SHA-256 `6890345121062f2d21c3c8e688f7c641a9e92ec2ca79122be8f9cd62ebdbcf3d`; includes `model.py` and `libriichi3p` | `mortal.pth` in the same release asset | PyTorch checkpoint, version 4, 775 observation channels, 44 actions |
+
+The Akagi hashes identify the tested release assets, whose bundled files are
+the runtime inputs. The three-player backend uses the bundle's `model.py` and
+its platform-specific `libriichi3p` binary. Its four-slot mjai shape is handled
+at the adapter boundary. The two extensions have distinct Python module names;
+both stay loaded in the same process without replacing `sys.modules` entries.
 
 ## Run locally
 
-Use Python 3.11, uv and a `libriichi` Python extension built from each pinned
-checkout. On Windows, the following commands create local, ignored module
-directories. The official crate outputs `riichi.dll`; the Mateces crate outputs
-`libriichi.dll`. Both Python modules are named `libriichi` and are isolated by
-the adapter at startup.
+Use Python 3.11, uv and a Rust toolchain for the official four-player extension.
+The following PowerShell commands keep checkouts, archives and extracted runtime
+files in local paths outside the Git index:
 
 ```powershell
 git clone https://github.com/Equim-chan/Mortal.git C:\Java\Mortal
 git -C C:\Java\Mortal checkout 0cff2b52982be5b1163aa9a62fb01f03ce91e0d2
-git clone https://github.com/Mateces/mortal-sanma.git C:\Java\mortal-sanma
-git -C C:\Java\mortal-sanma checkout bf69bc320d6072bbeae2abfdc57bf876a5bab2e3
-uv sync --python 3.11
 cargo build --manifest-path C:\Java\Mortal\libriichi\Cargo.toml --release --lib
-cargo build --manifest-path C:\Java\mortal-sanma\libriichi\Cargo.toml --release --lib
-New-Item -ItemType Directory -Force build\libriichi4, build\libriichi3
+New-Item -ItemType Directory -Force build\libriichi4
 Copy-Item C:\Java\Mortal\target\release\riichi.dll build\libriichi4\libriichi.pyd
-Copy-Item C:\Java\mortal-sanma\target\release\libriichi.dll build\libriichi3\libriichi.pyd
-uv run mchjong-mortal-adapter --mortal-checkout C:\Java\Mortal --model-4p C:\models\mortal4.pth --libriichi-4p-path build\libriichi4 --sanma-checkout C:\Java\mortal-sanma --model-3p C:\models\mortal3-v5.pth --libriichi-3p-path build\libriichi3
+Invoke-WebRequest https://github.com/shinkuan/Akagi-MjaiBot-Mortal/releases/download/v0.1.0/release4p.zip -OutFile build\release4p.zip
+Invoke-WebRequest https://github.com/shinkuan/Akagi-MjaiBot-Mortal/releases/download/v0.1.0/release3p.zip -OutFile build\release3p.zip
+Get-FileHash build\release4p.zip, build\release3p.zip -Algorithm SHA256
+Expand-Archive build\release4p.zip build\akagi4
+Expand-Archive build\release3p.zip build\akagi3
+uv sync --python 3.11
+uv run mchjong-mortal-adapter --mortal-checkout C:\Java\Mortal --model-4p build\akagi4\mortal.pth --libriichi-4p-path build\libriichi4 --sanma-runtime build\akagi3
 ```
 
-The default listener is `127.0.0.1:8791`; `--host` and `--port` override it.
-Omit the three sanma flags to run only official four-player Mortal. Run one
-Uvicorn worker so all sessions share each loaded model. The Mateces backend
-requires a version 5 checkpoint with 780 observation channels. Older
-three-player checkpoints with 775 channels do not match the pinned source.
-
-The three-player protocol layer handles native three-seat mjai, north
-extraction, and the historical four-slot `libriichi3p` representation used by
-[Akagi-MjaiBot-Mortal's `3p` branch](https://github.com/shinkuan/Akagi-MjaiBot-Mortal/tree/3p).
-The active Mateces backend uses three native slots, so it does not add a fourth
-slot to its requests. Its 44 action indices differ from the historical Akagi
-indices; the active Mateces mapping stays internal to this service.
+Compare both archive hashes with the table before extraction. The service
+listens on `127.0.0.1:8791` by default; `--host` and `--port` override it.
+Omit `--sanma-runtime` to serve four-player games only. Run one Uvicorn worker
+so each model loads once and all seat sessions share it. On other platforms,
+build the official `libriichi` extension for that Python interpreter and place
+it under `--libriichi-4p-path`; the Akagi bundle selects its matching
+`libriichi3p` binary from its `libriichi/` directory.
 
 ## HTTP contract
 
 `GET /v1/health` returns `{"status":"ready","bots":2}` when both backends
 have loaded (`bots` is 1 in four-player-only mode). `GET /v1/bots` lists IDs
-and supported player counts.
-`POST /v1/decisions` accepts one server-authorized decision. An example:
+and supported player counts. `POST /v1/decisions` accepts one server-authorized
+decision:
 
 ```json
 {
@@ -77,8 +78,8 @@ and supported player counts.
   },
   "events": [{"kind": "DRAW", "seat": 0, "tile": 52}],
   "legal_actions": [
-    {"id": "discard-1m", "type": "DISCARD", "tiles": [0]},
-    {"id": "discard-5p", "type": "DISCARD", "tiles": [52]}
+    {"type": "DISCARD", "tiles": [0]},
+    {"type": "DISCARD", "tiles": [52]}
   ],
   "drawn_tile": 52,
   "focus": null,
@@ -86,22 +87,21 @@ and supported player counts.
 }
 ```
 
-The response is
-`{"table_id":"...","session_id":"...","hand_number":0,"seat":0,"decision":12,"action_index":0,"action_id":"discard-1m"}`
-for the first action. `action_id` is `null` when the request did not supply
-one. MChjong remains responsible for authorizing the table and seat, issuing
-the legal list and decision token, and applying the returned index only if that
-decision is still current.
+The response echoes `table_id`, `session_id`, `hand_number`, `seat` and
+`decision`, and returns `action_index` into the issued `legal_actions`. MChjong
+authorizes the table and seat, supplies the legal list, and applies the index
+only while the decision token remains current. Its current Bot Service client
+consumes this response directly.
 
 Tile IDs use MChjong's physical convention: `kind * 4 + copy`, with bit `256`
-on a red five. `opening.hand` contains only the acting seat's 13 tiles. The
-adapter hides the other hands in mjai. `round` is the zero-based hand number
-across winds. `events` is the complete chronological list since that opening;
-on each request the service verifies the previous prefix and feeds only new
-events to the seat's bot. The final new event must offer the current decision.
-`session_id` is a fresh UUID for each table runtime. Use a higher `hand_number` and a
-new opening for each hand. The service replaces the old bot state for that
-table and seat when either value advances, keeping only the current hand.
+on a red five. `opening.hand` contains the acting seat's 13 tiles. The adapter
+hides the other hands in mjai. `round` is the zero-based hand number across
+winds. `events` is the complete chronological list since the opening; each
+request verifies the previous prefix and feeds only new events to its bot. The
+final new event must offer the current decision. `session_id` identifies one
+table runtime; session state is keyed by `(table_id, session_id, seat)`. Each
+session serializes its own requests while other sessions can infer concurrently.
+Advance `hand_number` and send a new opening for each hand.
 
 Event kinds are `DRAW`, `DISCARD`, `RIICHI_ACCEPTED`, `DORA`, `CHI`, `PON`,
 `OPEN_KAN`, `CLOSED_KAN`, `ADDED_KAN` and `NUKI`. A draw supplies `seat` and
@@ -115,27 +115,27 @@ tile. `melds` lists the acting seat's existing pon tiles when an added kan is
 legal. `drawn_tile` disambiguates an ordinary discard from tsumogiri.
 
 The adapter resolves Mortal's `reach` followed by `dahai` into one `RIICHI`
-choice, matches call source and consumed tiles, handles kan selection and sanma
-north extraction, and keeps compressed Q-value indexing inside the service.
-No mjai event or Q-value is returned to MChjong. Identical physical copies
-with the same visible face choose the first server-issued matching index.
-
-An unavailable backend returns `503`; a stale decision or changed hand history
-returns `409`; an unknown or illegal Mortal action returns `422`. A failed
-session is dropped so a later request can rebuild it from the full history.
-Repeated identical requests for the last decision return the cached answer.
+choice, matches call source and consumed tiles, and handles kan selection and
+sanma north extraction. Identical physical copies with the same visible face
+choose the first server-issued matching index. An unavailable backend returns
+`503`; a stale decision or changed hand history returns `409`; an unknown or
+illegal Mortal action returns `422`. A failed session is dropped so a later
+request can rebuild it from the full history. Repeated identical requests for
+the last decision return the cached answer.
 
 ## Verify
 
+The fast suite uses test doubles and runs with `uv run pytest -q`. Run the
+explicit real-model smoke after installing the inputs above:
+
 ```powershell
-uv run pytest -q
+uv run python smoke\real_models.py --mortal-checkout C:\Java\Mortal --model-4p build\akagi4\mortal.pth --libriichi-4p-path build\libriichi4 --sanma-runtime build\akagi3
 ```
 
-The tests cover one-time model loading, normal decisions, reach/discard,
-chi/kan selection, sanma north extraction, Q-value indices, isolated sessions
-and illegal-action rejection. Live inference additionally needs compatible
-external checkpoints. The local v4 three-player checkpoint with 775 input
-channels is incompatible with the pinned Mateces version 5 backend.
+The smoke loads both checkpoints and native extensions in one process, calls
+`start_game` and `start_kyoku` through `/v1/decisions`, checks the returned
+legal index for both player counts, then exercises four-player inference again
+after three-player inference. It is separate from the default pytest suite.
 
-This repository is licensed under AGPL-3.0-or-later. Both upstream projects
-remain independent checkouts under their own AGPL-3.0 licenses.
+This repository is licensed under AGPL-3.0-or-later. Upstream projects remain
+independent checkouts and release assets under their respective licenses.

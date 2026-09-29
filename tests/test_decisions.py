@@ -1,7 +1,6 @@
 import sys
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from threading import Barrier, Event
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
@@ -96,8 +95,11 @@ def test_model_loaded_once_for_multiple_seats(monkeypatch, tmp_path):
     bot_module.Bot = lambda engine, seat: (engine, seat)
     consts = ModuleType("libriichi.consts")
     consts.ACTION_SPACE = 46
+    extension = ModuleType("libriichi")
+    extension.__file__ = str(checkout / "mortal" / "libriichi.pyd")
     monkeypatch.setitem(sys.modules, "model", model)
     monkeypatch.setitem(sys.modules, "engine", engine)
+    monkeypatch.setitem(sys.modules, "libriichi", extension)
     monkeypatch.setitem(sys.modules, "libriichi.mjai", bot_module)
     monkeypatch.setitem(sys.modules, "libriichi.consts", consts)
     monkeypatch.setattr("mchjong_mortal_adapter.backends._source_module",
@@ -117,17 +119,16 @@ def test_model_source_revision_is_strict(monkeypatch, tmp_path):
 
 
 def test_sanma_model_loaded_once_for_multiple_seats(monkeypatch, tmp_path):
-    checkout = tmp_path / "sanma"
-    (checkout / "mortal").mkdir(parents=True)
-    model_path = tmp_path / "weights.pth"
-    model_path.touch()
-    monkeypatch.setattr("mchjong_mortal_adapter.backends._revision", lambda path, *_: path)
-    monkeypatch.setattr("mchjong_mortal_adapter.backends._sanma_extension", lambda _: nullcontext())
+    runtime = tmp_path / "sanma"
+    runtime.mkdir()
+    (runtime / "model.py").touch()
+    (runtime / "mortal.pth").touch()
+    monkeypatch.setattr("mchjong_mortal_adapter.backends._import_path", lambda _: None)
     loads = []
     torch = ModuleType("torch")
     torch.set_num_threads = lambda _: None
     torch.load = lambda *args, **kwargs: (loads.append(kwargs) or {
-        "config": {"control": {"version": 5}, "resnet": {"conv_channels": 4, "num_blocks": 1}},
+        "config": {"control": {"version": 4}, "resnet": {"conv_channels": 4, "num_blocks": 1}},
         "mortal": {}, "current_dqn": {},
     })
     monkeypatch.setitem(sys.modules, "torch", torch)
@@ -142,21 +143,23 @@ def test_sanma_model_loaded_once_for_multiple_seats(monkeypatch, tmp_path):
         def load_state_dict(self, state):
             pass
 
-    model = SimpleNamespace(Brain=Network, DQN=Network)
-    engine = SimpleNamespace(MortalEngine=lambda *args, **kwargs: object())
+    model = SimpleNamespace(Brain=Network, DQN=Network, MortalEngine=lambda *args, **kwargs: object(),
+                            Bot=lambda engine, seat: (engine, seat), ot_settings={})
     monkeypatch.setattr("mchjong_mortal_adapter.backends._source_module",
-                        lambda _, path: model if path.name == "model.py" else engine)
-    consts = ModuleType("libriichi.consts")
+                        lambda _, path: model)
+    extension = ModuleType("libriichi3p")
+    extension.__file__ = str(runtime / "libriichi3p.pyd")
+    consts = ModuleType("libriichi3p.consts")
     consts.ACTION_SPACE = 44
-    bot_module = ModuleType("libriichi.mjai")
-    bot_module.Bot = lambda engine, seat: (engine, seat)
-    monkeypatch.setitem(sys.modules, "libriichi.consts", consts)
-    monkeypatch.setitem(sys.modules, "libriichi.mjai", bot_module)
+    consts.obs_shape = lambda version: (775, 34)
+    monkeypatch.setitem(sys.modules, "libriichi3p", extension)
+    monkeypatch.setitem(sys.modules, "libriichi3p.consts", consts)
 
-    backend = ThreePlayerBackend(checkout, model_path, tmp_path)
+    backend = ThreePlayerBackend(runtime)
     first, second = backend.new_bot(0), backend.new_bot(1)
     assert first[0] is second[0] is backend.engine
     assert len(loads) == 1 and loads[0]["weights_only"] is True
+    assert model.ot_settings["online"] is False
 
 
 def test_plain_decision_and_http_endpoints():
@@ -336,13 +339,13 @@ def test_illegal_action_and_changed_history_are_rejected():
     assert error.value.status == 409
 
 
-def test_sanma_native_and_historical_mjai_shapes():
+def test_sanma_mjai_uses_four_slot_runtime_shape():
     position = request(players=3, actions=[{"type": "NUKI", "tiles": [120]}])
     from mchjong_mortal_adapter.mjai import opening_event
 
     native = opening_event(position)
     assert len(native["scores"]) == len(native["tehais"]) == 3
-    padded = to_libriichi3p(native, historical_slots=True)
+    padded = to_libriichi3p(native)
     assert padded["scores"] == [35000, 35000, 35000, 0]
     assert padded["tehais"][3] == ["?"] * 13
     assert native["scores"] == [35000] * 3

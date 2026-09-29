@@ -5,11 +5,10 @@ import importlib.util
 import json
 import subprocess
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
-from . import SANMA_REVISION, UPSTREAM_REVISION
+from . import UPSTREAM_REVISION
 from .sanma_protocol import from_libriichi3p, to_libriichi3p
 
 
@@ -47,33 +46,18 @@ def _source_module(name: str, path: Path) -> object:
     return module
 
 
-@contextmanager
-def _sanma_extension(path: Path):
-    """Import Mateces's same-named extension without replacing official Mortal."""
-    path = path.resolve(strict=True)
-    saved = {name: module for name, module in sys.modules.items()
-             if name == "libriichi" or name.startswith("libriichi.")}
-    for name in saved:
-        del sys.modules[name]
-    _import_path(path)
-    try:
-        yield
-    finally:
-        for name in list(sys.modules):
-            if name == "libriichi" or name.startswith("libriichi."):
-                del sys.modules[name]
-        sys.modules.update(saved)
-        sys.path.remove(str(path))
-
-
 class FourPlayerBackend:
     name = "mortal-4p"
 
     def __init__(self, checkout: Path, model_path: Path, libriichi_path: Path):
         checkout = _revision(checkout, UPSTREAM_REVISION, "official Mortal")
-        _import_path(libriichi_path.resolve(strict=True))
+        libriichi_path = libriichi_path.resolve(strict=True)
+        _import_path(libriichi_path)
         import torch
 
+        extension = importlib.import_module("libriichi")
+        if not Path(extension.__file__).resolve().is_relative_to(libriichi_path):
+            raise ValueError("libriichi was loaded from a different runtime")
         consts = importlib.import_module("libriichi.consts")
         if consts.ACTION_SPACE != 46:
             raise ValueError(f"official Mortal action space must be 46, got {consts.ACTION_SPACE}")
@@ -113,42 +97,45 @@ class FourPlayerBackend:
 
 
 class ThreePlayerBackend:
-    """Mateces native sanma model and extension, isolated from four-player code."""
+    """Akagi release3p model with its distinctly named libriichi3p extension."""
 
     name = "mortal-3p"
 
-    def __init__(self, checkout: Path, model_path: Path, libriichi_path: Path):
-        checkout = _revision(checkout, SANMA_REVISION, "Mateces sanma")
+    def __init__(self, runtime: Path):
+        runtime = runtime.resolve(strict=True)
+        _import_path(runtime)
         import torch
 
         torch.set_num_threads(1)
-        with _sanma_extension(libriichi_path):
-            consts = importlib.import_module("libriichi.consts")
-            if consts.ACTION_SPACE != 44:
-                raise ValueError(f"sanma action space must be 44, got {consts.ACTION_SPACE}")
-            Bot = importlib.import_module("libriichi.mjai").Bot
-            model = _source_module("_mchjong_mortal3_model", checkout / "mortal" / "model.py")
-            engine_module = _source_module("_mchjong_mortal3_engine", checkout / "mortal" / "engine.py")
-        state = torch.load(model_path.resolve(strict=True), weights_only=True, map_location="cpu")
+        model = _source_module("_mchjong_akagi3_model", runtime / "model.py")
+        extension = importlib.import_module("libriichi3p")
+        if not Path(extension.__file__).resolve().is_relative_to(runtime):
+            raise ValueError("libriichi3p was loaded from a different runtime")
+        consts = importlib.import_module("libriichi3p.consts")
+        if consts.ACTION_SPACE != 44 or consts.obs_shape(4) != (775, 34):
+            raise ValueError("Akagi sanma runtime must use 44 actions and 775 observation channels")
+        state = torch.load(runtime / "mortal.pth", weights_only=True, map_location="cpu")
         version = state["config"]["control"]["version"]
-        if version != 5:
-            raise ValueError(f"Mateces sanma model version must be 5, got {version}")
+        if version != 4:
+            raise ValueError(f"Akagi sanma model version must be 4, got {version}")
         brain = model.Brain(version=version, **state["config"]["resnet"]).eval()
         dqn = model.DQN(version=version).eval()
         brain.load_state_dict(state["mortal"])
         dqn.load_state_dict(state["current_dqn"])
-        self.engine = engine_module.MortalEngine(
+        model.ot_settings["online"] = False
+        self.engine = model.MortalEngine(
             brain, dqn, is_oracle=False, version=version,
             enable_rule_based_agari_guard=True, name="mortal3p",
         )
-        self.Bot = Bot
+        self.Bot = model.Bot
         self.version = version
 
     def new_bot(self, seat: int) -> object:
         return self.Bot(self.engine, seat)
 
     def react(self, bot: object, event: dict, can_act: bool) -> dict | None:
-        result = bot.react(json.dumps(to_libriichi3p(event), separators=(",", ":")), can_act=can_act)
+        result = bot.react(json.dumps(to_libriichi3p(event), separators=(",", ":")),
+                           can_act=can_act)
         return from_libriichi3p(json.loads(result)) if result is not None else None
 
     def resolve_reach(self, bot: object, response: dict, seat: int) -> tuple[dict, bool]:
