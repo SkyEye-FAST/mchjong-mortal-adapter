@@ -22,6 +22,9 @@ def position(players: int) -> dict:
         "session_id": str(UUID(int=players + 10)),
         "hand_number": 0,
         "seat": 0,
+        "protocol_version": 1,
+        "bot_id": "mortal-4p" if players == 4 else "mortal-3p",
+        "preset": "TENHOU_4" if players == 4 else "TENHOU_3",
         "player_count": players,
         "decision": 1,
         "opening": {
@@ -54,7 +57,7 @@ def main() -> None:
     assert sys.modules["libriichi3p"] is not four_module
 
     client = TestClient(create_app(DecisionService({4: four, 3: three})))
-    assert client.get("/v1/health").json() == {"status": "ready", "bots": 2}
+    assert client.get("/v1/health").json() == {"protocol_version": 1, "status": "ready", "bots": 2}
     assert len(client.get("/v1/bots").json()["bots"]) == 2
     for players in (4, 3):
         issued = position(players)

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from mchjong_mortal_adapter import UPSTREAM_REVISION
 from mchjong_mortal_adapter.api import create_app
 from mchjong_mortal_adapter.backends import FourPlayerBackend, ThreePlayerBackend, _revision
-from mchjong_mortal_adapter.contracts import DecisionRequest
+from mchjong_mortal_adapter.contracts import PROTOCOL_VERSION, DecisionRequest
 from mchjong_mortal_adapter.mjai import face, match_action
 from mchjong_mortal_adapter.sanma_protocol import from_libriichi3p, to_libriichi3p
 from mchjong_mortal_adapter.service import DecisionError, DecisionService
@@ -21,7 +21,7 @@ TABLE = UUID("00000000-0000-0000-0000-000000000001")
 SESSION = UUID("00000000-0000-0000-0000-000000000011")
 
 
-def request(*, table=TABLE, session=SESSION, hand=0, seat=0, players=4, decision=1, events=None,
+def request(*, table=TABLE, session=SESSION, hand=0, seat=0, players=4, bot_id="fake", decision=1, events=None,
             actions=None, focus=None, drawn=None, melds=None):
     drawn = (52 if players == 4 else 80) if drawn is None else drawn
     opening_hand = list(range(0, 52, 4)) if players == 4 else [
@@ -29,6 +29,8 @@ def request(*, table=TABLE, session=SESSION, hand=0, seat=0, players=4, decision
     ]
     return DecisionRequest.model_validate({
         "table_id": str(table), "session_id": str(session), "hand_number": hand, "seat": seat,
+        "protocol_version": PROTOCOL_VERSION, "bot_id": bot_id,
+        "preset": "TENHOU_3" if players == 3 else "TENHOU_4",
         "player_count": players, "decision": decision,
         "opening": {"round": 0, "dealer": 0, "honba": 0, "riichi_sticks": 0,
                     "scores": [25000 if players == 4 else 35000] * players,
@@ -165,15 +167,41 @@ def test_sanma_model_loaded_once_for_multiple_seats(monkeypatch, tmp_path):
 def test_plain_decision_and_http_endpoints():
     backend = FakeBackend([{"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False}])
     client = TestClient(create_app(DecisionService({4: backend})))
-    assert client.get("/v1/health").json() == {"status": "ready", "bots": 1}
-    assert client.get("/v1/bots").json() == {"bots": [{"id": "fake", "player_count": 4}]}
+    assert client.get("/v1/health").json() == {"protocol_version": PROTOCOL_VERSION, "status": "ready", "bots": 1}
+    assert client.get("/v1/bots").json() == {"protocol_version": PROTOCOL_VERSION,
+        "bots": [{"id": "fake", "name": "Fake", "player_count": 4, "presets": ["TENHOU_4"]}]}
     body = request().model_dump(mode="json")
     response = client.post("/v1/decisions", json=body)
     assert response.status_code == 200
     assert response.json()["action_index"] == 0
+    assert response.json()["protocol_version"] == PROTOCOL_VERSION
     assert "action_id" not in response.json()
     assert client.post("/v1/decisions", json=body).json() == response.json()
     assert len(backend.bots) == 1
+
+
+def test_bot_selection_protocol_and_preset_are_enforced():
+    service = DecisionService({4: FakeBackend([{"type": "none"}])})
+    client = TestClient(create_app(service))
+    body = request(actions=[{"type": "PASS"}],
+                   events=[{"kind": "DISCARD", "seat": 1, "tile": 0}]).model_dump(mode="json")
+    for change, status in (({"bot_id": "other"}, 503),
+                           ({"protocol_version": 2}, 400),
+                           ({"preset": "MAHJONG_SOUL_4"}, 422)):
+        assert client.post("/v1/decisions", json={**body, **change}).status_code == status
+    assert service.sessions == {}
+
+
+def test_idle_sessions_are_removed_before_new_decisions():
+    backend = FakeBackend([{"type": "none"}, {"type": "none"}])
+    service = DecisionService({4: backend})
+    first = request(actions=[{"type": "PASS"}], events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+    service.decide(first)
+    key = first.table_id, first.session_id, first.seat
+    service.sessions[key].last_used -= service.SESSION_TTL_SECONDS + 1
+    service.decide(request(table=UUID("00000000-0000-0000-0000-000000000002"),
+                           actions=[{"type": "PASS"}], events=[{"kind": "DISCARD", "seat": 1, "tile": 0}]))
+    assert key not in service.sessions
 
 
 def test_reach_discard_and_echo_are_one_server_action():

@@ -1,11 +1,12 @@
 """Long-lived model and isolated table/seat decision sessions."""
 
 import threading
+import time
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from .backends import BotBackend
-from .contracts import DecisionRequest, DecisionResponse, GameEvent, Opening
+from .contracts import PROTOCOL_VERSION, DecisionRequest, DecisionResponse, GameEvent, Opening
 from .mjai import event_lines, match_action, opening_event
 
 
@@ -18,8 +19,10 @@ class DecisionError(Exception):
 
 @dataclass
 class _Session:
+    bot_id: str
     hand_number: int
     opening: Opening
+    last_used: float = field(default_factory=time.monotonic)
     bot: object | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     events: list[GameEvent] = field(default_factory=list)
@@ -30,26 +33,40 @@ class _Session:
 
 
 class DecisionService:
+    SESSION_TTL_SECONDS = 30 * 60
+
     def __init__(self, backends: dict[int, BotBackend]):
         self.backends = backends
         self.sessions: dict[tuple[UUID, UUID, int], _Session] = {}
         self.lock = threading.Lock()
 
     def decide(self, request: DecisionRequest) -> DecisionResponse:
-        backend = self.backends.get(request.player_count)
+        if request.protocol_version != PROTOCOL_VERSION:
+            raise DecisionError(400, f"unsupported protocol version {request.protocol_version}")
+        backend = next((candidate for count, candidate in self.backends.items()
+                        if candidate.name == request.bot_id and count == request.player_count), None)
         if backend is None:
-            raise DecisionError(503, f"{request.player_count}-player backend is not configured")
+            raise DecisionError(503, f"bot {request.bot_id} is not available for {request.player_count} players")
+        if request.preset != ("TENHOU_3" if request.player_count == 3 else "TENHOU_4"):
+            raise DecisionError(422, f"bot {request.bot_id} does not support preset {request.preset}")
         key = request.table_id, request.session_id, request.seat
         while True:
             with self.lock:
+                now = time.monotonic()
+                for old_key, old_session in list(self.sessions.items()):
+                    if now - old_session.last_used > self.SESSION_TTL_SECONDS and not old_session.lock.locked():
+                        del self.sessions[old_key]
                 session = self.sessions.get(key)
                 if session is None:
-                    session = _Session(hand_number=request.hand_number, opening=request.opening)
+                    session = _Session(bot_id=request.bot_id, hand_number=request.hand_number, opening=request.opening)
                     self.sessions[key] = session
             with session.lock:
                 with self.lock:
                     if self.sessions.get(key) is not session:
                         continue
+                    session.last_used = time.monotonic()
+                if session.bot_id != request.bot_id:
+                    raise DecisionError(409, "bot changed within a session")
                 return self._decide_locked(request, backend, key, session)
 
     def _decide_locked(self, request: DecisionRequest, backend: BotBackend,
@@ -103,6 +120,8 @@ class DecisionService:
                 result, session.pending_reach = backend.resolve_reach(session.bot, result, request.seat)
             index = match_action(request, result, reach=reach)
             answer = DecisionResponse(
+                protocol_version=PROTOCOL_VERSION,
+                bot_id=request.bot_id,
                 table_id=request.table_id, session_id=request.session_id,
                 hand_number=request.hand_number,
                 seat=request.seat, decision=request.decision,

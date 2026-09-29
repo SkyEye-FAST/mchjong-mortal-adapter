@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI, HTTPException
 
-from .contracts import DecisionRequest, DecisionResponse
+from .contracts import PROTOCOL_VERSION, DecisionRequest, DecisionResponse
 from .service import DecisionError, DecisionService
 
 
@@ -11,12 +11,14 @@ def create_app(service: DecisionService) -> FastAPI:
 
     @app.get("/v1/health")
     def health() -> dict:
-        return {"status": "ready", "bots": len(service.backends)}
+        return {"protocol_version": PROTOCOL_VERSION, "status": "ready", "bots": len(service.backends)}
 
     @app.get("/v1/bots")
     def bots() -> dict:
-        return {"bots": [{"id": backend.name, "player_count": count}
-                         for count, backend in sorted(service.backends.items())]}
+        return {"protocol_version": PROTOCOL_VERSION, "bots": [
+            {"id": backend.name, "name": backend.name.replace("-", " ").title(),
+             "player_count": count, "presets": ["TENHOU_3" if count == 3 else "TENHOU_4"]}
+            for count, backend in sorted(service.backends.items())]}
 
     @app.post("/v1/decisions", response_model=DecisionResponse)
     def decide(request: DecisionRequest) -> DecisionResponse:

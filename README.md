@@ -54,13 +54,20 @@ it under `--libriichi-4p-path`; the Akagi bundle selects its matching
 
 ## HTTP contract
 
-`GET /v1/health` returns `{"status":"ready","bots":2}` when both backends
-have loaded (`bots` is 1 in four-player-only mode). `GET /v1/bots` lists IDs
-and supported player counts. `POST /v1/decisions` accepts one server-authorized
+`GET /v1/health` returns
+`{"protocol_version":1,"status":"ready","bots":2}` when both backends
+have loaded (`bots` is 1 in four-player-only mode). `GET /v1/bots` returns
+`protocol_version: 1` and Bot entries with stable `id`, display `name`,
+`player_count`, and exact `presets`. The four-player model advertises
+`mortal-4p` / `TENHOU_4`; the three-player model advertises
+`mortal-3p` / `TENHOU_3`. `POST /v1/decisions` accepts one server-authorized
 decision:
 
 ```json
 {
+  "protocol_version": 1,
+  "bot_id": "mortal-4p",
+  "preset": "TENHOU_4",
   "table_id": "00000000-0000-0000-0000-000000000001",
   "session_id": "00000000-0000-0000-0000-000000000011",
   "hand_number": 0,
@@ -87,7 +94,7 @@ decision:
 }
 ```
 
-The response echoes `table_id`, `session_id`, `hand_number`, `seat` and
+The response echoes `protocol_version`, `bot_id`, `table_id`, `session_id`, `hand_number`, `seat` and
 `decision`, and returns `action_index` into the issued `legal_actions`. MChjong
 authorizes the table and seat, supplies the legal list, and applies the index
 only while the decision token remains current. Its current Bot Service client
@@ -101,6 +108,7 @@ request verifies the previous prefix and feeds only new events to its bot. The
 final new event must offer the current decision. `session_id` identifies one
 table runtime; session state is keyed by `(table_id, session_id, seat)`. Each
 session serializes its own requests while other sessions can infer concurrently.
+Idle session state is removed after 30 minutes when the service receives a request.
 Advance `hand_number` and send a new opening for each hand.
 
 Event kinds are `DRAW`, `DISCARD`, `RIICHI_ACCEPTED`, `DORA`, `CHI`, `PON`,
@@ -118,14 +126,15 @@ The adapter resolves Mortal's `reach` followed by `dahai` into one `RIICHI`
 choice, matches call source and consumed tiles, and handles kan selection and
 sanma north extraction. Identical physical copies with the same visible face
 choose the first server-issued matching index. An unavailable backend returns
-`503`; a stale decision or changed hand history returns `409`; an unknown or
-illegal Mortal action returns `422`. A failed session is dropped so a later
+`503`; an incompatible protocol version returns `400`; an unsupported preset
+or illegal Mortal action returns `422`. A failed session is dropped so a later
 request can rebuild it from the full history. Repeated identical requests for
 the last decision return the cached answer.
 
 ## Verify
 
-The fast suite uses test doubles and runs with `uv run pytest -q`. Run the
+GitHub Actions uses Python 3.11, `uv sync --locked`, `uv run pytest -q` and
+`uv build`. The fast suite uses test doubles. Run the
 explicit real-model smoke after installing the inputs above:
 
 ```powershell

@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+PROTOCOL_VERSION = 1
+
 
 ActionType = Literal[
     "DISCARD", "RIICHI", "CHI", "PON", "OPEN_KAN", "CLOSED_KAN",
@@ -53,6 +55,9 @@ class LegalAction(BaseModel):
 
 
 class DecisionRequest(BaseModel):
+    protocol_version: int
+    bot_id: str = Field(min_length=1)
+    preset: str = Field(min_length=1)
     table_id: UUID
     session_id: UUID
     hand_number: int = Field(ge=0)
@@ -76,6 +81,8 @@ class DecisionRequest(BaseModel):
 
 
 class DecisionResponse(BaseModel):
+    protocol_version: int
+    bot_id: str
     table_id: UUID
     session_id: UUID
     hand_number: int
