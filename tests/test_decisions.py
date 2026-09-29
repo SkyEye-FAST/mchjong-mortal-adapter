@@ -22,12 +22,17 @@ SESSION = UUID("00000000-0000-0000-0000-000000000011")
 
 
 def request(*, table=TABLE, session=SESSION, hand=0, seat=0, players=4, decision=1, events=None,
-            actions=None, focus=None, drawn=52, melds=None):
+            actions=None, focus=None, drawn=None, melds=None):
+    drawn = (52 if players == 4 else 80) if drawn is None else drawn
+    opening_hand = list(range(0, 52, 4)) if players == 4 else [
+        0, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76,
+    ]
     return DecisionRequest.model_validate({
         "table_id": str(table), "session_id": str(session), "hand_number": hand, "seat": seat,
         "player_count": players, "decision": decision,
         "opening": {"round": 0, "dealer": 0, "honba": 0, "riichi_sticks": 0,
-                    "scores": [25000] * players, "hand": list(range(0, 52, 4)),
+                    "scores": [25000 if players == 4 else 35000] * players,
+                    "hand": opening_hand,
                     "dora_marker": 108},
         "events": events if events is not None else [{"kind": "DRAW", "seat": seat, "tile": 52}],
         "legal_actions": actions if actions is not None else [{"type": "DISCARD", "tiles": [0], "id": "discard-1m"}],
@@ -184,6 +189,23 @@ def test_reach_discard_and_echo_are_one_server_action():
     assert len(reaches) == 1
 
 
+def test_sanma_reach_discard_remains_one_server_action():
+    backend = FakeBackend([
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ])
+    service = DecisionService({3: backend})
+    first = request(players=3, actions=[{"type": "RIICHI", "tiles": [0]}])
+    assert service.decide(first).action_index == 0
+    events = [*first.events, {"kind": "DISCARD", "seat": 0, "tile": 0, "riichi": True},
+              {"kind": "DRAW", "seat": 0, "tile": 84}]
+    second = request(players=3, decision=2, events=events,
+                     actions=[{"type": "DISCARD", "tiles": [32]}], drawn=84)
+    assert service.decide(second).action_index == 0
+    assert sum(event["type"] == "reach" for event, _ in backend.bots[0]["events"]) == 1
+
+
 def test_claims_and_kan_match_only_server_issued_choices():
     chi = request(events=[{"kind": "DISCARD", "seat": 1, "tile": 8}],
                   focus={"seat": 1, "tile": 8},
@@ -254,6 +276,9 @@ def test_q_values_use_mortal_reach_kan_and_sanma_indices():
     sanma = request(players=3, actions=[{"type": "NUKI", "tiles": [120]}])
     assert selected_q(sanma, sanma.legal_actions[0],
                       {"meta": {"mask_bits": 1 << 38, "q_values": [4.5]}}) == 4.5
+    sanma_kan = request(players=3, actions=[{"type": "CLOSED_KAN", "tiles": [0, 1, 2, 3]}])
+    assert selected_q(sanma_kan, sanma_kan.legal_actions[0],
+                      {"meta": {"kan_select": {"mask_bits": 1, "q_values": [5.5]}}}) == 5.5
 
 
 def test_sanma_native_and_historical_mjai_shapes():
@@ -263,9 +288,9 @@ def test_sanma_native_and_historical_mjai_shapes():
     native = opening_event(position)
     assert len(native["scores"]) == len(native["tehais"]) == 3
     padded = to_libriichi3p(native, historical_slots=True)
-    assert padded["scores"] == [25000, 25000, 25000, 0]
+    assert padded["scores"] == [35000, 35000, 35000, 0]
     assert padded["tehais"][3] == ["?"] * 13
-    assert native["scores"] == [25000] * 3
+    assert native["scores"] == [35000] * 3
     assert to_libriichi3p({"type": "kita", "actor": 0}) == {
         "type": "nukidora", "actor": 0, "pai": "N",
     }
