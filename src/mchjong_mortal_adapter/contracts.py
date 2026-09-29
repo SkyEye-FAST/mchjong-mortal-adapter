@@ -50,7 +50,6 @@ class Meld(BaseModel):
 class LegalAction(BaseModel):
     type: ActionType
     tiles: list[int] = Field(default_factory=list)
-    id: str | None = None
 
 
 class DecisionRequest(BaseModel):
@@ -83,4 +82,3 @@ class DecisionResponse(BaseModel):
     seat: int
     decision: int
     action_index: int
-    action_id: str | None = None

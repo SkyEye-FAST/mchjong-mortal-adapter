@@ -1,6 +1,8 @@
 import sys
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from threading import Barrier, Event
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
 
@@ -12,7 +14,6 @@ from mchjong_mortal_adapter.api import create_app
 from mchjong_mortal_adapter.backends import FourPlayerBackend, ThreePlayerBackend, _revision
 from mchjong_mortal_adapter.contracts import DecisionRequest
 from mchjong_mortal_adapter.mjai import face, match_action
-from mchjong_mortal_adapter.qvalues import selected_q
 from mchjong_mortal_adapter.sanma_protocol import from_libriichi3p, to_libriichi3p
 from mchjong_mortal_adapter.service import DecisionError, DecisionService
 
@@ -35,7 +36,7 @@ def request(*, table=TABLE, session=SESSION, hand=0, seat=0, players=4, decision
                     "hand": opening_hand,
                     "dora_marker": 108},
         "events": events if events is not None else [{"kind": "DRAW", "seat": seat, "tile": 52}],
-        "legal_actions": actions if actions is not None else [{"type": "DISCARD", "tiles": [0], "id": "discard-1m"}],
+        "legal_actions": actions if actions is not None else [{"type": "DISCARD", "tiles": [0]}],
         "focus": focus, "drawn_tile": drawn, "melds": melds or [],
     })
 
@@ -167,7 +168,7 @@ def test_plain_decision_and_http_endpoints():
     response = client.post("/v1/decisions", json=body)
     assert response.status_code == 200
     assert response.json()["action_index"] == 0
-    assert response.json()["action_id"] == "discard-1m"
+    assert "action_id" not in response.json()
     assert client.post("/v1/decisions", json=body).json() == response.json()
     assert len(backend.bots) == 1
 
@@ -245,6 +246,78 @@ def test_table_and_seat_sessions_are_isolated():
     assert len({id(bot) for bot in backend.bots}) == 3
 
 
+def test_late_request_from_old_session_keeps_new_session_state():
+    backend = FakeBackend([{"type": "none"}] * 3)
+    service = DecisionService({4: backend})
+    other_session = UUID("00000000-0000-0000-0000-000000000012")
+    first = request(actions=[{"type": "PASS"}],
+                    events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+    newer = request(session=other_session, actions=[{"type": "PASS"}],
+                    events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+    service.decide(first)
+    new_answer = service.decide(newer)
+    late = request(decision=2, actions=[{"type": "PASS"}],
+                   events=[*first.events, {"kind": "DISCARD", "seat": 1, "tile": 4}])
+    service.decide(late)
+    assert service.decide(newer) == new_answer
+    assert len(service.sessions) == 2
+    assert len(backend.bots[1]["events"]) == 3
+
+
+def test_different_sessions_infer_concurrently():
+    barrier = Barrier(2, timeout=3)
+
+    class ConcurrentBackend(FakeBackend):
+        def react(self, bot, event, can_act):
+            if can_act:
+                barrier.wait()
+                return {"type": "none"}
+            return None
+
+    service = DecisionService({4: ConcurrentBackend([])})
+    positions = [request(table=UUID(f"00000000-0000-0000-0000-{table:012d}"),
+                         actions=[{"type": "PASS"}],
+                         events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+                 for table in (1, 2)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        answers = list(pool.map(service.decide, positions))
+    assert [answer.action_index for answer in answers] == [0, 0]
+
+
+def test_one_session_serializes_requests():
+    entered = Event()
+    release = Event()
+    calls = []
+
+    class BlockingBackend(FakeBackend):
+        def react(self, bot, event, can_act):
+            if can_act:
+                calls.append(event)
+                if len(calls) == 1:
+                    entered.set()
+                    assert release.wait(3)
+                return {"type": "none"}
+            return None
+
+    service = DecisionService({4: BlockingBackend([])})
+    first = request(actions=[{"type": "PASS"}],
+                    events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+    second = request(decision=2, actions=[{"type": "PASS"}],
+                     events=[*first.events, {"kind": "DISCARD", "seat": 1, "tile": 4}])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        initial = pool.submit(service.decide, first)
+        assert entered.wait(3)
+        following = pool.submit(service.decide, second)
+        try:
+            assert not following.done()
+            assert len(calls) == 1
+        finally:
+            release.set()
+        assert initial.result().action_index == 0
+        assert following.result().action_index == 0
+    assert len(calls) == 2
+
+
 def test_illegal_action_and_changed_history_are_rejected():
     backend = FakeBackend([
         {"type": "pon", "actor": 0, "target": 1, "pai": "1m", "consumed": ["1m", "1m"]},
@@ -261,24 +334,6 @@ def test_illegal_action_and_changed_history_are_rejected():
         service.decide(request(decision=2, events=[{"kind": "DISCARD", "seat": 1, "tile": 4}],
                                actions=[{"type": "PASS"}]))
     assert error.value.status == 409
-
-
-def test_q_values_use_mortal_reach_kan_and_sanma_indices():
-    red = request(actions=[{"type": "DISCARD", "tiles": [272]}])
-    assert selected_q(red, red.legal_actions[0],
-                      {"meta": {"mask_bits": 1 << 34, "q_values": [1.25]}}) == 1.25
-    reach = request(actions=[{"type": "RIICHI", "tiles": [0]}])
-    assert selected_q(reach, reach.legal_actions[0], {},
-                      {"meta": {"mask_bits": 1, "q_values": [2.5]}}) == 2.5
-    kan = request(actions=[{"type": "CLOSED_KAN", "tiles": [0, 1, 2, 3]}])
-    assert selected_q(kan, kan.legal_actions[0],
-                      {"meta": {"kan_select": {"mask_bits": 1, "q_values": [3.5]}}}) == 3.5
-    sanma = request(players=3, actions=[{"type": "NUKI", "tiles": [120]}])
-    assert selected_q(sanma, sanma.legal_actions[0],
-                      {"meta": {"mask_bits": 1 << 38, "q_values": [4.5]}}) == 4.5
-    sanma_kan = request(players=3, actions=[{"type": "CLOSED_KAN", "tiles": [0, 1, 2, 3]}])
-    assert selected_q(sanma_kan, sanma_kan.legal_actions[0],
-                      {"meta": {"kan_select": {"mask_bits": 1, "q_values": [5.5]}}}) == 5.5
 
 
 def test_sanma_native_and_historical_mjai_shapes():
