@@ -49,12 +49,13 @@ extraction, and the historical four-slot `libriichi3p` representation used by
 [Akagi-MjaiBot-Mortal's `3p` branch](https://github.com/shinkuan/Akagi-MjaiBot-Mortal/tree/3p).
 The active Mateces backend uses three native slots, so it does not add a fourth
 slot to its requests. Its 44 action indices differ from the historical Akagi
-indices; both mappings remain internal to this service.
+indices; the active Mateces mapping stays internal to this service.
 
 ## HTTP contract
 
-`GET /v1/health` returns `{"status":"ready","bots":1}` when the configured
-backends have loaded. `GET /v1/bots` lists IDs and supported player counts.
+`GET /v1/health` returns `{"status":"ready","bots":2}` when both backends
+have loaded (`bots` is 1 in four-player-only mode). `GET /v1/bots` lists IDs
+and supported player counts.
 `POST /v1/decisions` accepts one server-authorized decision. An example:
 
 ```json
