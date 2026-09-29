@@ -106,7 +106,7 @@ hides the other hands in mjai. `round` is the zero-based hand number across
 winds. `events` is the complete chronological list since the opening; each
 request verifies the previous prefix and feeds only new events to its bot. The
 final new event must offer the current decision. `session_id` identifies one
-table runtime; session state is keyed by `(table_id, session_id, seat)`. Each
+table runtime; session state is keyed by `(table_id, session_id, seat, bot_id)`. Each
 session serializes its own requests while other sessions can infer concurrently.
 Idle session state is removed after 30 minutes when the service receives a request.
 Advance `hand_number` and send a new opening for each hand.

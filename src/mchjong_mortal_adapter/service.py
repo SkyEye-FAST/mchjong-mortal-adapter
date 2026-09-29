@@ -19,7 +19,6 @@ class DecisionError(Exception):
 
 @dataclass
 class _Session:
-    bot_id: str
     hand_number: int
     opening: Opening
     last_used: float = field(default_factory=time.monotonic)
@@ -35,21 +34,23 @@ class _Session:
 class DecisionService:
     SESSION_TTL_SECONDS = 30 * 60
 
-    def __init__(self, backends: dict[int, BotBackend]):
+    def __init__(self, backends: dict[str, tuple[int, BotBackend]]):
+        if any(bot_id != backend.name for bot_id, (_, backend) in backends.items()):
+            raise ValueError("backend registry ID does not match backend name")
         self.backends = backends
-        self.sessions: dict[tuple[UUID, UUID, int], _Session] = {}
+        self.sessions: dict[tuple[UUID, UUID, int, str], _Session] = {}
         self.lock = threading.Lock()
 
     def decide(self, request: DecisionRequest) -> DecisionResponse:
         if request.protocol_version != PROTOCOL_VERSION:
             raise DecisionError(400, f"unsupported protocol version {request.protocol_version}")
-        backend = next((candidate for count, candidate in self.backends.items()
-                        if candidate.name == request.bot_id and count == request.player_count), None)
-        if backend is None:
+        selected = self.backends.get(request.bot_id)
+        if selected is None or selected[0] != request.player_count:
             raise DecisionError(503, f"bot {request.bot_id} is not available for {request.player_count} players")
+        backend = selected[1]
         if request.preset != ("TENHOU_3" if request.player_count == 3 else "TENHOU_4"):
             raise DecisionError(422, f"bot {request.bot_id} does not support preset {request.preset}")
-        key = request.table_id, request.session_id, request.seat
+        key = request.table_id, request.session_id, request.seat, request.bot_id
         while True:
             with self.lock:
                 now = time.monotonic()
@@ -58,19 +59,17 @@ class DecisionService:
                         del self.sessions[old_key]
                 session = self.sessions.get(key)
                 if session is None:
-                    session = _Session(bot_id=request.bot_id, hand_number=request.hand_number, opening=request.opening)
+                    session = _Session(hand_number=request.hand_number, opening=request.opening)
                     self.sessions[key] = session
             with session.lock:
                 with self.lock:
                     if self.sessions.get(key) is not session:
                         continue
                     session.last_used = time.monotonic()
-                if session.bot_id != request.bot_id:
-                    raise DecisionError(409, "bot changed within a session")
                 return self._decide_locked(request, backend, key, session)
 
     def _decide_locked(self, request: DecisionRequest, backend: BotBackend,
-                       key: tuple[UUID, UUID, int], session: _Session) -> DecisionResponse:
+                       key: tuple[UUID, UUID, int, str], session: _Session) -> DecisionResponse:
         if request.hand_number > session.hand_number:
             session.bot = None
             session.hand_number = request.hand_number

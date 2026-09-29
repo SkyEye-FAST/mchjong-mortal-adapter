@@ -20,9 +20,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8791)
     args = parser.parse_args()
 
-    backends = {4: FourPlayerBackend(args.mortal_checkout, args.model_4p, args.libriichi_4p_path)}
+    four = FourPlayerBackend(args.mortal_checkout, args.model_4p, args.libriichi_4p_path)
+    backends = {four.name: (4, four)}
     if args.sanma_runtime:
-        backends[3] = ThreePlayerBackend(args.sanma_runtime)
+        three = ThreePlayerBackend(args.sanma_runtime)
+        backends[three.name] = (3, three)
     uvicorn.run(create_app(DecisionService(backends)), host=args.host, port=args.port, workers=1)
 
 

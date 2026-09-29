@@ -56,7 +56,7 @@ def main() -> None:
     assert importlib.import_module("libriichi3p.consts").ACTION_SPACE == 44
     assert sys.modules["libriichi3p"] is not four_module
 
-    client = TestClient(create_app(DecisionService({4: four, 3: three})))
+    client = TestClient(create_app(DecisionService({four.name: (4, four), three.name: (3, three)})))
     assert client.get("/v1/health").json() == {"protocol_version": 1, "status": "ready", "bots": 2}
     assert len(client.get("/v1/bots").json()["bots"]) == 2
     for players in (4, 3):

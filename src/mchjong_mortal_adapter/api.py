@@ -18,7 +18,7 @@ def create_app(service: DecisionService) -> FastAPI:
         return {"protocol_version": PROTOCOL_VERSION, "bots": [
             {"id": backend.name, "name": backend.name.replace("-", " ").title(),
              "player_count": count, "presets": ["TENHOU_3" if count == 3 else "TENHOU_4"]}
-            for count, backend in sorted(service.backends.items())]}
+            for _, (count, backend) in sorted(service.backends.items())]}
 
     @app.post("/v1/decisions", response_model=DecisionResponse)
     def decide(request: DecisionRequest) -> DecisionResponse:

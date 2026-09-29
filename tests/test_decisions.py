@@ -166,7 +166,7 @@ def test_sanma_model_loaded_once_for_multiple_seats(monkeypatch, tmp_path):
 
 def test_plain_decision_and_http_endpoints():
     backend = FakeBackend([{"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False}])
-    client = TestClient(create_app(DecisionService({4: backend})))
+    client = TestClient(create_app(DecisionService({backend.name: (4, backend)})))
     assert client.get("/v1/health").json() == {"protocol_version": PROTOCOL_VERSION, "status": "ready", "bots": 1}
     assert client.get("/v1/bots").json() == {"protocol_version": PROTOCOL_VERSION,
         "bots": [{"id": "fake", "name": "Fake", "player_count": 4, "presets": ["TENHOU_4"]}]}
@@ -181,7 +181,7 @@ def test_plain_decision_and_http_endpoints():
 
 
 def test_bot_selection_protocol_and_preset_are_enforced():
-    service = DecisionService({4: FakeBackend([{"type": "none"}])})
+    service = DecisionService({"fake": (4, FakeBackend([{"type": "none"}]))})
     client = TestClient(create_app(service))
     body = request(actions=[{"type": "PASS"}],
                    events=[{"kind": "DISCARD", "seat": 1, "tile": 0}]).model_dump(mode="json")
@@ -192,12 +192,28 @@ def test_bot_selection_protocol_and_preset_are_enforced():
     assert service.sessions == {}
 
 
+def test_bot_id_selects_between_backends_with_the_same_player_count():
+    class OtherBackend(FakeBackend):
+        name = "other"
+
+    first = FakeBackend([{"type": "none"}])
+    second = OtherBackend([{"type": "none"}])
+    service = DecisionService({"fake": (4, first), "other": (4, second)})
+    issued = request(bot_id="other", actions=[{"type": "PASS"}],
+                     events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
+    assert service.decide(issued).bot_id == "other"
+    assert len(first.bots) == 0 and len(second.bots) == 1
+    assert service.decide(request(actions=[{"type": "PASS"}],
+                                  events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])).bot_id == "fake"
+    assert len(first.bots) == 1
+
+
 def test_idle_sessions_are_removed_before_new_decisions():
     backend = FakeBackend([{"type": "none"}, {"type": "none"}])
-    service = DecisionService({4: backend})
+    service = DecisionService({backend.name: (4, backend)})
     first = request(actions=[{"type": "PASS"}], events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
     service.decide(first)
-    key = first.table_id, first.session_id, first.seat
+    key = first.table_id, first.session_id, first.seat, first.bot_id
     service.sessions[key].last_used -= service.SESSION_TTL_SECONDS + 1
     service.decide(request(table=UUID("00000000-0000-0000-0000-000000000002"),
                            actions=[{"type": "PASS"}], events=[{"kind": "DISCARD", "seat": 1, "tile": 0}]))
@@ -210,7 +226,7 @@ def test_reach_discard_and_echo_are_one_server_action():
         {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
         {"type": "dahai", "actor": 0, "pai": "2m", "tsumogiri": False},
     ])
-    service = DecisionService({4: backend})
+    service = DecisionService({backend.name: (4, backend)})
     first = request(actions=[{"type": "RIICHI", "tiles": [0]}])
     assert service.decide(first).action_index == 0
     events = [*first.events, {"kind": "DISCARD", "seat": 0, "tile": 0, "riichi": True},
@@ -227,7 +243,7 @@ def test_sanma_reach_discard_remains_one_server_action():
         {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
         {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
     ])
-    service = DecisionService({3: backend})
+    service = DecisionService({backend.name: (3, backend)})
     first = request(players=3, actions=[{"type": "RIICHI", "tiles": [0]}])
     assert service.decide(first).action_index == 0
     events = [*first.events, {"kind": "DISCARD", "seat": 0, "tile": 0, "riichi": True},
@@ -255,18 +271,18 @@ def test_claims_and_kan_match_only_server_issued_choices():
 
 def test_sanma_north_extraction_is_a_separate_backend():
     backend = FakeBackend([{"type": "kita", "actor": 0}])
-    service = DecisionService({3: backend})
+    service = DecisionService({backend.name: (3, backend)})
     north = 120
     position = request(players=3, events=[{"kind": "DRAW", "seat": 0, "tile": north}],
                        actions=[{"type": "NUKI", "tiles": [north]}], drawn=north)
     assert service.decide(position).action_index == 0
     assert face(north) == "N"
-    assert service.backends[3] is backend
+    assert service.backends[backend.name][1] is backend
 
 
 def test_table_and_seat_sessions_are_isolated():
     backend = FakeBackend([{"type": "none"}, {"type": "none"}, {"type": "none"}])
-    service = DecisionService({4: backend})
+    service = DecisionService({backend.name: (4, backend)})
     other = UUID("00000000-0000-0000-0000-000000000002")
     for table, seat in ((TABLE, 0), (TABLE, 1), (other, 0)):
         position = request(table=table, seat=seat,
@@ -279,7 +295,7 @@ def test_table_and_seat_sessions_are_isolated():
 
 def test_late_request_from_old_session_keeps_new_session_state():
     backend = FakeBackend([{"type": "none"}] * 3)
-    service = DecisionService({4: backend})
+    service = DecisionService({backend.name: (4, backend)})
     other_session = UUID("00000000-0000-0000-0000-000000000012")
     first = request(actions=[{"type": "PASS"}],
                     events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
@@ -305,7 +321,7 @@ def test_different_sessions_infer_concurrently():
                 return {"type": "none"}
             return None
 
-    service = DecisionService({4: ConcurrentBackend([])})
+    service = DecisionService({"fake": (4, ConcurrentBackend([]))})
     positions = [request(table=UUID(f"00000000-0000-0000-0000-{table:012d}"),
                          actions=[{"type": "PASS"}],
                          events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
@@ -330,7 +346,7 @@ def test_one_session_serializes_requests():
                 return {"type": "none"}
             return None
 
-    service = DecisionService({4: BlockingBackend([])})
+    service = DecisionService({"fake": (4, BlockingBackend([]))})
     first = request(actions=[{"type": "PASS"}],
                     events=[{"kind": "DISCARD", "seat": 1, "tile": 0}])
     second = request(decision=2, actions=[{"type": "PASS"}],
@@ -354,7 +370,7 @@ def test_illegal_action_and_changed_history_are_rejected():
         {"type": "pon", "actor": 0, "target": 1, "pai": "1m", "consumed": ["1m", "1m"]},
         {"type": "none"},
     ])
-    service = DecisionService({4: backend})
+    service = DecisionService({backend.name: (4, backend)})
     with pytest.raises(DecisionError) as error:
         service.decide(request())
     assert error.value.status == 422
